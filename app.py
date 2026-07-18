@@ -1,0 +1,810 @@
+import streamlit as st
+import pandas as pd
+import sqlite3
+from pathlib import Path
+from datetime import date, timedelta
+
+# ------------------------------------------------------------------
+# 1. CONFIGURATION
+# ------------------------------------------------------------------
+TIME_SLOTS = [
+    ("16:30 – 19:00", 1, 2.5),
+    ("19:00 – 21:00", 6, 2.0),
+    ("21:00 – 23:00", 1, 2.0),
+]
+SLOT_CAPACITY = {s[0]: s[1] for s in TIME_SLOTS}
+SLOT_HOURS = {s[0]: s[2] for s in TIME_SLOTS}
+
+DB_PATH = Path(__file__).parent / "bookings.db"
+
+# ------------------------------------------------------------------
+# 1b. TRANSLATIONS
+# ------------------------------------------------------------------
+DAY_NAMES = {
+    "en": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+    "es": ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"],
+}
+MONTHS = {
+    "en": ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+    "es": ["Ene", "Feb", "Mar", "Abr", "May", "Jun",
+           "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"],
+}
+
+T = {
+    # ---- Login screen ----
+    "title":                   {"en": "Time Slot Coordinator",    "es": "Coordinador de Horarios"},
+    "who_are_you":             {"en": "Who are you?",             "es": "¿Quién eres?"},
+    "existing_users":          {"en": "Existing users",            "es": "Usuarios existentes"},
+    "or_create_new_user":      {"en": "Or create a new user",      "es": "O crea un nuevo usuario"},
+    "your_name":               {"en": "Your name",                 "es": "Tu nombre"},
+    "enter_name_placeholder":  {"en": "Enter your name",           "es": "Escribe tu nombre"},
+    "please_enter_name":       {"en": "Please enter a name.",      "es": "Por favor, escribe un nombre."},
+    "enter_btn":               {"en": "Enter",                     "es": "Entrar"},
+
+    # ---- Logged-in header ----
+    "switch_user":             {"en": "Switch user",               "es": "Cambiar usuario"},
+    "logged_in_as":            {"en": "Logged in as",              "es": "Conectado como"},
+    "date_range":              {"en": "Next two weeks — from {start} to {end}",
+                                 "es": "Próximas dos semanas — del {start} al {end}"},
+
+    # ---- Metrics ----
+    "total_bookings":          {"en": "Total Bookings",            "es": "Reservas Totales"},
+    "bookings_across":         {"en": "{n} across {t} slots",      "es": "{n} de {t} turnos"},
+    "your_bookings":           {"en": "Your bookings ({user})",    "es": "Tus reservas ({user})"},
+    "slots_hours":             {"en": "{s} slots · {h} h",         "es": "{s} turnos · {h} h"},
+    "your_waitlist":           {"en": "Waitlisted ({user})",       "es": "En espera ({user})"},
+    "waitlist_count":          {"en": "{n} waitlisted",            "es": "{n} en espera"},
+
+    # ---- Calendar ----
+    "schedule_calendar":       {"en": "Schedule Calendar",          "es": "Calendario de Turnos"},
+    "week_1":                  {"en": "Week 1 — {start} to {end}", "es": "Semana 1 — {start} al {end}"},
+    "week_2":                  {"en": "Week 2 — {start} to {end}", "es": "Semana 2 — {start} al {end}"},
+    "editing":                 {"en": "Editing",                   "es": "Editando"},
+
+    # ---- Cell buttons / labels ----
+    "book":                    {"en": "Book",                       "es": "Reservar"},
+    "book_n":                  {"en": "Book ({n}/{cap})",           "es": "Reservar ({n}/{cap})"},
+    "full":                    {"en": "Full ({n}/{cap})",           "es": "Lleno ({n}/{cap})"},
+    "full_waiting":            {"en": "Full ({n}/{cap}) +{w} waiting",
+                                 "es": "Lleno ({n}/{cap}) +{w} en espera"},
+    "you_n":                   {"en": "✓ You ({n}/{cap})",          "es": "✓ Tú ({n}/{cap})"},
+    "unbook_header":           {"en": "Unbook:",                    "es": "Liberar:"},
+    "unbook_btn_you":          {"en": "✕ Unbook me",                "es": "✕ Liberar turno"},
+    "yes_unbook_me":           {"en": "Yes, unbook myself",         "es": "Sí, liberar mi turno"},
+    "no_keep":                 {"en": "No, keep",                   "es": "No, mantener"},
+    "close":                   {"en": "Close",                      "es": "Cerrar"},
+
+    # ---- Waitlist ----
+    "join_waitlist":           {"en": "Join waitlist",              "es": "Lista de espera"},
+    "join_waitlist_n":         {"en": "Waitlist ({n}/{cap} +{w})", "es": "Espera ({n}/{cap} +{w})"},
+    "waitlisted_you":          {"en": "✓ Waitlisted",               "es": "✓ En espera"},
+    "waitlisted_you_n":        {"en": "✓ Waitlisted (#{pos})",      "es": "✓ En espera (#{pos})"},
+    "waitlist_header":         {"en": "Waitlist:",                  "es": "Lista de espera:"},
+    "leave_waitlist":          {"en": "Leave waitlist",             "es": "Salir de la lista"},
+    "promoted_from_waitlist":  {"en": "{name} promoted from waitlist!",
+                                 "es": "¡{name} promovido de la lista de espera!"},
+
+    # ---- Leaderboard ----
+    "all_bookings_hours":      {"en": "All Bookings & Hours",      "es": "Todas las Reservas y Horas"},
+    "col_participant":         {"en": "Participant",                "es": "Participante"},
+    "col_total_hours":         {"en": "Total Hours",                "es": "Horas Totales"},
+    "col_slots":               {"en": "Slots",                      "es": "Turnos"},
+    "full_schedule":           {"en": "Full Schedule",              "es": "Horario Completo"},
+    "col_date":                {"en": "Date",                       "es": "Fecha"},
+    "col_time":                {"en": "Time",                       "es": "Hora"},
+    "col_hours":               {"en": "Hours",                      "es": "Horas"},
+    "no_bookings_yet":         {"en": "No bookings yet. Click any cell in the calendar above to book!",
+                                 "es": "No hay reservas aún. ¡Haz clic en una celda del calendario para reservar!"},
+
+    # ---- Errors / status ----
+    "slot_full":               {"en": "This slot is now full ({n}/{cap}).",
+                                 "es": "Este turno ya está lleno ({n}/{cap})."},
+    "already_booked":          {"en": "You have already booked this slot.",
+                                 "es": "Ya has reservado este turno."},
+    "already_waitlisted":      {"en": "You are already on the waitlist.",
+                                 "es": "Ya estás en la lista de espera."},
+
+    # ---- Dialog ----
+    "slot_details":            {"en": "Slot details",               "es": "Detalles del turno"},
+    "download_db":             {"en": "Download DB",                "es": "Descargar BD"},
+    "export_calendar":         {"en": "Export to calendar",         "es": "Exportar a calendario"},
+    "no_bookings_to_export":   {"en": "No bookings to export.",      "es": "No hay reservas para exportar."},
+
+    # ---- Calendar name setup ----
+    "calendar_name_title":     {"en": "Welcome!",                   "es": "¡Bienvenido!"},
+    "calendar_name_prompt":    {"en": "What's the name of this calendar?",
+                                 "es": "¿Cómo se llama este calendario?"},
+    "calendar_name_placeholder": {"en": "e.g. Football Team, Study Group...",
+                                   "es": "ej. Equipo de Fútbol, Grupo de Estudio..."},
+    "calendar_name_submit":    {"en": "Get started",                "es": "Empezar"},
+    "calendar_name_required":  {"en": "Please enter a calendar name.",
+                                 "es": "Por favor, escribe un nombre para el calendario."},
+    "default_title":           {"en": "Time Slot Coordinator",    "es": "Coordinador de Horarios"},
+    "ics_summary":             {"en": "{name} – {slot}",            "es": "{name} – {slot}"},
+    "owner_label":             {"en": "(owner)",                    "es": "(admin)"},
+
+    # ---- Lang selector ----
+    "language":                {"en": "Language",                   "es": "Idioma"},
+}
+
+
+def t(key, **kwargs):
+    lang = st.session_state.get("lang", "en")
+    entry = T.get(key, {})
+    text = entry.get(lang, entry.get("en", key))
+    if kwargs:
+        return text.format(**kwargs)
+    return text
+
+
+def day_name(date_obj):
+    lang = st.session_state.get("lang", "en")
+    return DAY_NAMES[lang][date_obj.weekday()]
+
+
+def month_name(date_obj):
+    lang = st.session_state.get("lang", "en")
+    return MONTHS[lang][date_obj.month - 1]
+
+
+def format_date_range(start, end):
+    return (f"{day_name(start)} {start.day} {month_name(start)}",
+            f"{day_name(end)} {end.day} {month_name(end)} {end.year}")
+
+
+def _parse_slot_times(slot_label):
+    """Extract (start_time, end_time) strings like ('163000','190000') from slot label."""
+    parts = slot_label.split(" – ")
+    def _to_ical(t):
+        t = t.strip().replace(":", "")
+        return t if len(t) == 6 else t + "00"
+    return _to_ical(parts[0]), _to_ical(parts[1])
+
+
+def generate_ics(user_name, df_bookings, cal_name):
+    """Generate an .ics calendar file with the user's bookings."""
+    name = cal_name or "Team Schedule"
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", f"PRODID:-//Schedully//{name}//EN"]
+    my_rows = df_bookings[df_bookings["participant_name"] == user_name]
+    for _, row in my_rows.iterrows():
+        date_str = row["slot_date"].replace("-", "")
+        start, end = _parse_slot_times(row["slot_time"])
+        lines.extend([
+            "BEGIN:VEVENT",
+            f"DTSTART:{date_str}T{start}",
+            f"DTEND:{date_str}T{end}",
+            f"SUMMARY:{name} – {row['slot_time']}",
+            "END:VEVENT",
+        ])
+    lines.append("END:VCALENDAR")
+    return "\r\n".join(lines)
+
+
+# ------------------------------------------------------------------
+# 2. DATABASE
+# ------------------------------------------------------------------
+def init_db():
+    conn = sqlite3.connect(str(DB_PATH))
+    # Handle old schema migration
+    cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='bookings'")
+    if cur.fetchone():
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(bookings)").fetchall()]
+        if "slot_name" in cols:
+            conn.execute("ALTER TABLE bookings RENAME TO bookings_backup")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS bookings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            slot_date TEXT NOT NULL,
+            slot_time TEXT NOT NULL,
+            participant_name TEXT NOT NULL,
+            UNIQUE(slot_date, slot_time, participant_name)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS waitlist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            slot_date TEXT NOT NULL,
+            slot_time TEXT NOT NULL,
+            participant_name TEXT NOT NULL,
+            UNIQUE(slot_date, slot_time, participant_name)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def get_setting(key, default=None):
+    conn = sqlite3.connect(str(DB_PATH))
+    row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    conn.close()
+    return row[0] if row else default
+
+
+def set_setting(key, value):
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_bookings():
+    conn = sqlite3.connect(str(DB_PATH))
+    df = pd.read_sql("SELECT * FROM bookings ORDER BY slot_date, slot_time", conn)
+    conn.close()
+    return df
+
+
+def get_waitlist():
+    conn = sqlite3.connect(str(DB_PATH))
+    df = pd.read_sql("SELECT * FROM waitlist ORDER BY slot_date, slot_time, id", conn)
+    conn.close()
+    return df
+
+
+def get_slot_count(slot_date, slot_time):
+    conn = sqlite3.connect(str(DB_PATH))
+    count = conn.execute(
+        "SELECT COUNT(*) FROM bookings WHERE slot_date = ? AND slot_time = ?",
+        (slot_date, slot_time),
+    ).fetchone()[0]
+    conn.close()
+    return count
+
+
+def book_slot(slot_date, slot_time, name):
+    capacity = SLOT_CAPACITY[slot_time]
+    current = get_slot_count(slot_date, slot_time)
+    if current >= capacity:
+        st.error(t("slot_full", n=current, cap=capacity))
+        return False
+    conn = sqlite3.connect(str(DB_PATH))
+    try:
+        conn.execute(
+            "INSERT INTO bookings (slot_date, slot_time, participant_name) VALUES (?, ?, ?)",
+            (slot_date, slot_time, name),
+        )
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        st.error(t("already_booked"))
+        return False
+    finally:
+        conn.close()
+
+
+def add_to_waitlist(slot_date, slot_time, name):
+    conn = sqlite3.connect(str(DB_PATH))
+    try:
+        conn.execute(
+            "INSERT INTO waitlist (slot_date, slot_time, participant_name) VALUES (?, ?, ?)",
+            (slot_date, slot_time, name),
+        )
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        st.error(t("already_waitlisted"))
+        return False
+    finally:
+        conn.close()
+
+
+def remove_from_waitlist(slot_date, slot_time, name):
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.execute(
+        "DELETE FROM waitlist WHERE slot_date = ? AND slot_time = ? AND participant_name = ?",
+        (slot_date, slot_time, name),
+    )
+    conn.commit()
+    conn.close()
+
+
+def unbook_slot(slot_date, slot_time, name):
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.execute(
+        "DELETE FROM bookings WHERE slot_date = ? AND slot_time = ? AND participant_name = ?",
+        (slot_date, slot_time, name),
+    )
+    # Auto-promote first person on waitlist
+    promoted = conn.execute(
+        "SELECT participant_name FROM waitlist WHERE slot_date = ? AND slot_time = ? ORDER BY id LIMIT 1",
+        (slot_date, slot_time),
+    ).fetchone()
+    promoted_name = None
+    if promoted:
+        promoted_name = promoted[0]
+        conn.execute(
+            "INSERT INTO bookings (slot_date, slot_time, participant_name) VALUES (?, ?, ?)",
+            (slot_date, slot_time, promoted_name),
+        )
+        conn.execute(
+            "DELETE FROM waitlist WHERE slot_date = ? AND slot_time = ? AND participant_name = ?",
+            (slot_date, slot_time, promoted_name),
+        )
+    conn.commit()
+    conn.close()
+    if promoted_name:
+        st.success(t("promoted_from_waitlist", name=promoted_name))
+
+
+# ------------------------------------------------------------------
+# 3. INIT & FETCH
+# ------------------------------------------------------------------
+init_db()
+df_bookings = get_bookings()
+df_waitlist = get_waitlist()
+
+booking_lookup = {}
+existing_users = set()
+if not df_bookings.empty:
+    for _, row in df_bookings.iterrows():
+        key = (row["slot_date"], row["slot_time"])
+        booking_lookup.setdefault(key, []).append(row["participant_name"])
+        existing_users.add(row["participant_name"])
+
+# Waitlist lookup: {(date, time): [(name, position), ...]}
+waitlist_lookup = {}
+if not df_waitlist.empty:
+    for _, row in df_waitlist.iterrows():
+        key = (row["slot_date"], row["slot_time"])
+        waitlist_lookup.setdefault(key, []).append(row["participant_name"])
+
+# Also include waitlisted users in "existing users"
+for wl_list in waitlist_lookup.values():
+    existing_users.update(wl_list)
+
+existing_users = sorted(existing_users)
+
+# Calendar name and owner from settings
+calendar_name = get_setting("calendar_name", "")
+owner_name = get_setting("owner", "")
+
+# Session state
+if "lang" not in st.session_state:
+    st.session_state.lang = "en"
+if "current_user" not in st.session_state:
+    st.session_state.current_user = None
+if "dialog_cell" not in st.session_state:
+    st.session_state.dialog_cell = None  # (date_str, slot_label) or None
+
+# Generate 14 days from today
+today = date.today()
+all_days = [today + timedelta(days=i) for i in range(14)]
+week1 = all_days[:7]
+week2 = all_days[7:14]
+
+st.set_page_config(page_title=calendar_name or t("default_title"), page_icon="📅", layout="wide")
+
+
+# ------------------------------------------------------------------
+# 4. CALENDAR NAME SETUP SCREEN
+# ------------------------------------------------------------------
+def render_calendar_setup():
+    st.title(t("calendar_name_title"))
+    st.markdown(
+        "<div style='text-align:center;font-size:2.5em;margin:0.5em 0 0.2em 0;'>📅</div>",
+        unsafe_allow_html=True,
+    )
+    col1, col2, col3 = st.columns([1, 1.5, 1])
+    with col2:
+        st.markdown(f"**{t('calendar_name_prompt')}**")
+        with st.form("calendar_name_form"):
+            cal_name = st.text_input(
+                t("calendar_name_prompt"),
+                placeholder=t("calendar_name_placeholder"),
+                label_visibility="collapsed",
+            ).strip()
+            submitted = st.form_submit_button(
+                t("calendar_name_submit"), use_container_width=True, type="primary"
+            )
+            if submitted:
+                if cal_name:
+                    set_setting("calendar_name", cal_name)
+                    st.rerun()
+                else:
+                    st.warning(t("calendar_name_required"))
+    st.stop()
+
+
+# ------------------------------------------------------------------
+# 5. USER SELECTION SCREEN
+# ------------------------------------------------------------------
+def render_login():
+    st.title(calendar_name or t("default_title"))
+    st.markdown(
+        "<div style='text-align:center;font-size:3em;margin:0.5em 0 0.2em 0;'>📅</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<div style='text-align:center;margin-bottom:1.5em;'>{t('who_are_you')}</div>",
+        unsafe_allow_html=True,
+    )
+
+    col1, col2, col3 = st.columns([1, 1.5, 1])
+
+    with col2:
+        if existing_users:
+            st.markdown(f"**{t('existing_users')}**")
+            cols_per_row = 3
+            for i in range(0, len(existing_users), cols_per_row):
+                user_cols = st.columns(cols_per_row, gap="small")
+                for j, user_name in enumerate(existing_users[i:i + cols_per_row]):
+                    with user_cols[j]:
+                        label = f"{user_name} {t('owner_label')}" if user_name == owner_name else user_name
+                        if st.button(label, key=f"login_{user_name}", use_container_width=True,
+                                     type="primary"):
+                            if not owner_name:
+                                set_setting("owner", user_name)
+                            st.session_state.current_user = user_name
+                            st.rerun()
+
+        st.markdown("---")
+        st.markdown(f"**{t('or_create_new_user')}**")
+        with st.form("new_user_form"):
+            new_name = st.text_input(
+                t("your_name"), placeholder=t("enter_name_placeholder")
+            ).strip()
+            submitted = st.form_submit_button(
+                t("enter_btn"), use_container_width=True, type="primary"
+            )
+            if submitted:
+                if new_name:
+                    if not owner_name:
+                        set_setting("owner", new_name)
+                    st.session_state.current_user = new_name
+                    st.rerun()
+                else:
+                    st.warning(t("please_enter_name"))
+
+    st.stop()
+
+
+# ------------------------------------------------------------------
+# 5. DIALOG (for unbook / cell details)
+# ------------------------------------------------------------------
+@st.dialog(t("slot_details"))
+def render_cell_dialog():
+    if not st.session_state.get("dialog_cell"):
+        return
+    date_str, slot_label = st.session_state.dialog_cell
+    user = st.session_state.current_user
+    people = booking_lookup.get((date_str, slot_label), [])
+    waiting = waitlist_lookup.get((date_str, slot_label), [])
+    capacity = SLOT_CAPACITY[slot_label]
+    booked = len(people)
+    user_is_in = user in people
+    user_on_waitlist = user in waiting
+    full = booked >= capacity
+
+    d = date.fromisoformat(date_str)
+    st.markdown(f"**{day_name(d)} {d.day} {month_name(d)} — {slot_label}**")
+    st.caption(f"{booked}/{capacity}")
+
+    # Booked list
+    if people:
+        st.markdown(f"**{t('col_participant')}:**")
+        for name in people:
+            mark = " (you)" if name == user else ""
+            st.markdown(f"- {name}{mark}")
+
+    # Waitlist
+    if waiting:
+        st.markdown(f"**{t('waitlist_header')}**")
+        for pos, name in enumerate(waiting, 1):
+            mark = " (you)" if name == user else ""
+            st.markdown(f"{pos}. {name}{mark}")
+
+    st.markdown("---")
+
+    # Actions
+    if user_is_in:
+        if st.button(t("unbook_btn_you"), use_container_width=True, type="primary"):
+            unbook_slot(date_str, slot_label, user)
+            st.session_state.dialog_cell = None
+            st.rerun()
+    elif user_on_waitlist:
+        if st.button(t("leave_waitlist"), use_container_width=True):
+            remove_from_waitlist(date_str, slot_label, user)
+            st.session_state.dialog_cell = None
+            st.rerun()
+    elif not full:
+        if st.button(t("book"), use_container_width=True, type="primary"):
+            if book_slot(date_str, slot_label, user):
+                st.session_state.dialog_cell = None
+                st.rerun()
+    elif not user_is_in and not user_on_waitlist:
+        if st.button(t("join_waitlist"), use_container_width=True):
+            if add_to_waitlist(date_str, slot_label, user):
+                st.session_state.dialog_cell = None
+                st.rerun()
+
+    if st.button(t("close"), use_container_width=True):
+        st.session_state.dialog_cell = None
+        st.rerun()
+
+
+# ------------------------------------------------------------------
+# 6. CALENDAR RENDERING
+# ------------------------------------------------------------------
+def _render_booking_names(people, waiting, waiting_count, user, user_is_in):
+    """Show booking/waitlist names with fixed height for alignment."""
+    # Booking area — always rendered at exactly 2.5em height
+    if people:
+        shown = people[:2]
+        overflow = len(people) - 2
+        lines = "<br>".join(shown)
+        if overflow > 0:
+            lines += f"<br><span style='opacity:0.5'>+{overflow}</span>"
+        bg = "#d4edda" if user_is_in else "#e8e8e8"
+        border = "#28a745" if user_is_in else "#aaa"
+        st.markdown(
+            f"<div style='height:2.5em;padding:0.15em 0.3em;box-sizing:border-box;"
+            f"overflow:hidden;font-size:0.78em;line-height:1.35;"
+            f"background:{bg};border-radius:4px;"
+            f"border-left:3px solid {border};color:#222;'>{lines}</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown("<div style='height:2.5em;'></div>", unsafe_allow_html=True)
+
+    # Waitlist area — always rendered at exactly 1.1em height
+    if waiting_count:
+        shown = waiting[:2]
+        overflow = waiting_count - 2
+        wait_text = ", ".join(shown)
+        if overflow > 0:
+            wait_text += f" +{overflow}"
+        st.markdown(
+            f"<div style='height:1.1em;padding:0.1em 0.3em;box-sizing:border-box;"
+            f"overflow:hidden;font-size:0.7em;line-height:1.3;"
+            f"background:#fffbe6;border-radius:4px;"
+            f"color:#997700;'>☐ {wait_text}</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown("<div style='height:1.1em;'></div>", unsafe_allow_html=True)
+
+
+def render_week_grid(week_days, week_label):
+    st.markdown(f"#### {week_label}")
+    user = st.session_state.current_user
+
+    for d in week_days:
+        date_str = d.isoformat()
+        with st.container(border=True):
+            # Day header
+            st.markdown(f"**{day_name(d)} {d.day} {month_name(d)}**")
+
+            # 3 time slots side-by-side within this day card
+            slot_cols = st.columns(3, gap="small")
+            for j, (slot_label, capacity, hours) in enumerate(TIME_SLOTS):
+                people = booking_lookup.get((date_str, slot_label), [])
+                waiting = waitlist_lookup.get((date_str, slot_label), [])
+                booked = len(people)
+                waiting_count = len(waiting)
+                full = booked >= capacity
+                cell_id = f"{date_str}|{slot_label}"
+                user_is_in = user in people
+                user_on_waitlist = user in waiting
+
+                with slot_cols[j]:
+                    st.caption(slot_label.replace(" – ", "–"))
+
+                    if user_is_in:
+                        if st.button(t("you_n", n=booked, cap=capacity), key=f"btn_{cell_id}",
+                                     use_container_width=True, type="primary"):
+                            st.session_state.dialog_cell = (date_str, slot_label)
+                            st.rerun()
+                    elif user_on_waitlist:
+                        pos = waiting.index(user) + 1
+                        if st.button(t("waitlisted_you_n", pos=pos), key=f"btn_{cell_id}",
+                                     use_container_width=True, type="primary"):
+                            st.session_state.dialog_cell = (date_str, slot_label)
+                            st.rerun()
+                    elif full:
+                        btn_label = t("join_waitlist_n", n=booked, cap=capacity, w=waiting_count) if waiting_count else t("join_waitlist")
+                        if st.button(btn_label, key=f"btn_{cell_id}", use_container_width=True):
+                            if add_to_waitlist(date_str, slot_label, user):
+                                st.rerun()
+                    elif people:
+                        if st.button(t("book_n", n=booked, cap=capacity), key=f"btn_{cell_id}",
+                                     use_container_width=True, type="primary"):
+                            if book_slot(date_str, slot_label, user):
+                                st.rerun()
+                    else:
+                        if st.button(t("book"), key=f"btn_{cell_id}", use_container_width=True,
+                                     type="primary"):
+                            if book_slot(date_str, slot_label, user):
+                                st.rerun()
+
+                    # Names below button (no fixed heights needed here)
+                    _render_booking_names_compact(people, waiting, waiting_count, user, user_is_in)
+
+
+def _render_booking_names_compact(people, waiting, waiting_count, user, user_is_in):
+    """Show booking/waitlist names compactly (no alignment needed)."""
+    if people:
+        shown = people[:3]
+        overflow = len(people) - 3
+        text = ", ".join(shown)
+        if overflow > 0:
+            text += f" +{overflow}"
+        bg = "#d4edda" if user_is_in else "#f5f5f5"
+        st.markdown(
+            f"<div style='padding:0.1em 0.3em;font-size:0.75em;line-height:1.3;"
+            f"background:{bg};border-radius:3px;color:#333;'>{text}</div>",
+            unsafe_allow_html=True,
+        )
+    if waiting_count:
+        shown = waiting[:2]
+        overflow = waiting_count - 2
+        text = ", ".join(shown)
+        if overflow > 0:
+            text += f" +{overflow}"
+        st.markdown(
+            f"<div style='padding:0.05em 0.3em;font-size:0.68em;line-height:1.2;"
+            f"background:#fffbe6;border-radius:3px;color:#997700;'>☐ {text}</div>",
+            unsafe_allow_html=True,
+        )
+
+
+# ------------------------------------------------------------------
+# 6. MAIN
+# ------------------------------------------------------------------
+
+# Language selector — always visible, top-right
+_, lang_col = st.columns([5.5, 1.5])
+with lang_col:
+    current_lang = st.session_state.lang
+    lang_labels = {"en": "🇬🇧 EN", "es": "🇪🇸 ES"}
+    options = list(lang_labels.keys())
+    new_lang = st.segmented_control(
+        t("language"),
+        options,
+        default=current_lang,
+        format_func=lambda x: lang_labels[x],
+        key="lang_selector",
+    )
+    if new_lang != st.session_state.lang:
+        st.session_state.lang = new_lang
+        st.rerun()
+
+# Calendar name setup (first connection)
+if not calendar_name:
+    render_calendar_setup()
+
+if st.session_state.current_user is None:
+    render_login()
+
+# Dialog (opens above the calendar)
+if st.session_state.get("dialog_cell"):
+    render_cell_dialog()
+
+# ---- Logged-in header ----
+user = st.session_state.current_user
+
+col_title, col_switch = st.columns([4, 1])
+with col_title:
+    st.title(calendar_name or t("default_title"))
+    start_str, end_str = format_date_range(week1[0], week2[-1])
+    st.caption(t("date_range", start=start_str, end=end_str))
+with col_switch:
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button(t("switch_user"), use_container_width=True):
+        st.session_state.current_user = None
+        st.session_state.dialog_cell = None
+        st.rerun()
+    st.caption(f"{t('logged_in_as')} **{user}**")
+
+col1, col2 = st.columns([3, 1], gap="medium")
+with col1:
+    total_cells = len(all_days) * len(TIME_SLOTS)
+    total_bookings = len(df_bookings) if not df_bookings.empty else 0
+    total_waitlisted = len(df_waitlist) if not df_waitlist.empty else 0
+
+    my_bookings = 0
+    my_hours = 0.0
+    my_waitlisted = 0
+    if not df_bookings.empty:
+        my_rows = df_bookings[df_bookings["participant_name"] == user]
+        my_bookings = len(my_rows)
+        if not my_rows.empty:
+            my_hours = my_rows["slot_time"].map(SLOT_HOURS).sum()
+    if not df_waitlist.empty:
+        my_waitlisted = len(df_waitlist[df_waitlist["participant_name"] == user])
+
+    st.metric(label=t("total_bookings"), value=t("bookings_across", n=total_bookings, t=total_cells))
+    st.metric(label=t("your_bookings", user=user), value=t("slots_hours", s=my_bookings, h=my_hours))
+    if my_waitlisted:
+        st.metric(label=t("your_waitlist", user=user), value=t("waitlist_count", n=my_waitlisted))
+
+with col2:
+    if DB_PATH.exists() and user == owner_name:
+        with open(str(DB_PATH), "rb") as f:
+            st.download_button(
+                label=t("download_db"),
+                data=f,
+                file_name="bookings.db",
+                mime="application/octet-stream",
+                use_container_width=True,
+            )
+    # Export current user's bookings as .ics
+    if not df_bookings.empty and user in df_bookings["participant_name"].values:
+        ics_data = generate_ics(user, df_bookings, calendar_name)
+        st.download_button(
+            label=t("export_calendar"),
+            data=ics_data,
+            file_name=f"schedully_{user}.ics",
+            mime="text/calendar",
+            use_container_width=True,
+        )
+
+st.markdown("---")
+
+# ---- CALENDAR ----
+st.subheader(t("schedule_calendar"))
+
+w1_start, w1_end = format_date_range(week1[0], week1[-1])
+w2_start, w2_end = format_date_range(week2[0], week2[-1])
+
+render_week_grid(week1, t("week_1", start=w1_start, end=w1_end))
+st.markdown("<br>", unsafe_allow_html=True)
+render_week_grid(week2, t("week_2", start=w2_start, end=w2_end))
+
+st.markdown("---")
+
+# ---- SUMMARY ----
+st.subheader(t("all_bookings_hours"))
+
+if not df_bookings.empty:
+    # Leaderboard
+    df_bookings["hours"] = df_bookings["slot_time"].map(SLOT_HOURS)
+    tally = df_bookings.groupby("participant_name")["hours"].sum().reset_index()
+    tally = tally.sort_values("hours", ascending=False)
+    tally.columns = [t("col_participant"), t("col_total_hours")]
+    tally[t("col_slots")] = df_bookings.groupby("participant_name").size().values
+    st.dataframe(tally, hide_index=True, use_container_width=True)
+
+    # Calendar grid view of the full schedule
+    st.subheader(t("full_schedule"))
+
+    def _render_schedule_table(week_days):
+        rows = []
+        for slot_label, _, _ in TIME_SLOTS:
+            cells = []
+            for d in week_days:
+                date_str = d.isoformat()
+                booked = booking_lookup.get((date_str, slot_label), [])
+                waiting = waitlist_lookup.get((date_str, slot_label), [])
+                parts = []
+                if booked:
+                    parts.append("<b>" + ", ".join(booked) + "</b>")
+                if waiting:
+                    parts.append(
+                        "<span style='font-size:0.82em;color:#997700;'>"
+                        + "☐ " + ", ".join(waiting) + "</span>"
+                    )
+                cells.append(" &nbsp;·&nbsp; ".join(parts) if parts else "—")
+            rows.append(f"<tr><td style='font-weight:600;font-size:0.82em;white-space:nowrap'>"
+                        f"{slot_label}</td>" + "".join(f"<td style='font-size:0.82em'>{c}</td>" for c in cells) + "</tr>")
+
+        headers = "".join(f"<th style='font-size:0.82em'>{day_name(d)}<br>{d.day} {month_name(d)}</th>" for d in week_days)
+        return (
+            "<table style='width:100%;border-collapse:collapse;text-align:center;vertical-align:top'>"
+            f"<thead><tr><th></th>{headers}</tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table>"
+        )
+
+    st.markdown(_render_schedule_table(week1), unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown(_render_schedule_table(week2), unsafe_allow_html=True)
+else:
+    st.info(t("no_bookings_yet"))
