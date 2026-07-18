@@ -392,6 +392,8 @@ if "current_user" not in st.session_state:
     st.session_state.current_user = None
 if "dialog_cell" not in st.session_state:
     st.session_state.dialog_cell = None  # (date_str, slot_label) or None
+if "_dialog_shown" not in st.session_state:
+    st.session_state._dialog_shown = False
 
 # Check database is set up
 if SUPABASE_URL and SUPABASE_KEY and SUPABASE_KEY != "YOUR_SERVICE_ROLE_KEY_HERE":
@@ -726,7 +728,15 @@ if st.session_state.current_user is None:
 
 # Dialog (opens above the calendar)
 if st.session_state.get("dialog_cell"):
-    render_cell_dialog()
+    if st.session_state.get("_dialog_shown"):
+        # Dialog was dismissed via native X on previous run — clear it
+        st.session_state.dialog_cell = None
+        st.session_state._dialog_shown = False
+    else:
+        render_cell_dialog()
+        st.session_state._dialog_shown = True
+else:
+    st.session_state._dialog_shown = False
 
 # ---- Logged-in header ----
 user = st.session_state.current_user
