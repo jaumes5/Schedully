@@ -8,9 +8,10 @@ from datetime import date, timedelta
 # 1. CONFIGURATION
 # ------------------------------------------------------------------
 TIME_SLOTS = [
-    ("16:30 – 19:00", 1, 2.5),
-    ("19:00 – 21:00", 6, 2.0),
-    ("21:00 – 23:00", 1, 2.0),
+    ("08:30 – 09:30", 4, 1.0),
+    ("13:00 – 14:00", 4, 1.0),
+    ("16:00 – 17:00", 4, 1.0),
+    ("19:30 – 20:30", 4, 1.0),
 ]
 SLOT_CAPACITY = {s[0]: s[1] for s in TIME_SLOTS}
 SLOT_HOURS = {s[0]: s[2] for s in TIME_SLOTS}
@@ -369,7 +370,7 @@ owner_name = get_setting("owner", "")
 
 # Session state
 if "lang" not in st.session_state:
-    st.session_state.lang = "en"
+    st.session_state.lang = "es"
 if "current_user" not in st.session_state:
     st.session_state.current_user = None
 if "dialog_cell" not in st.session_state:
@@ -583,8 +584,8 @@ def render_week_grid(week_days, week_label):
             # Day header
             st.markdown(f"**{day_name(d)} {d.day} {month_name(d)}**")
 
-            # 3 time slots side-by-side within this day card
-            slot_cols = st.columns(3, gap="small")
+            # Time slots side-by-side within this day card
+            slot_cols = st.columns(len(TIME_SLOTS), gap="small")
             for j, (slot_label, capacity, hours) in enumerate(TIME_SLOTS):
                 people = booking_lookup.get((date_str, slot_label), [])
                 waiting = waitlist_lookup.get((date_str, slot_label), [])
