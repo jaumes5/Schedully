@@ -1,11 +1,14 @@
-from dotenv import load_dotenv
-load_dotenv()
-
 import streamlit as st
 import pandas as pd
 import os
 import requests
 from datetime import date, timedelta
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 # ------------------------------------------------------------------
 # 1. CONFIGURATION
@@ -19,9 +22,9 @@ TIME_SLOTS = [
 SLOT_CAPACITY = {s[0]: s[1] for s in TIME_SLOTS}
 SLOT_HOURS = {s[0]: s[2] for s in TIME_SLOTS}
 
-# Supabase REST API
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+# Supabase REST API (st.secrets on Cloud, .env locally)
+SUPABASE_URL = st.secrets.get("SUPABASE_URL", os.getenv("SUPABASE_URL", ""))
+SUPABASE_KEY = st.secrets.get("SUPABASE_SERVICE_KEY", os.getenv("SUPABASE_SERVICE_KEY", ""))
 
 def _req(method, path, data=None, params=None):
     headers = {
