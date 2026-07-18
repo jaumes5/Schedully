@@ -597,7 +597,7 @@ def render_week_grid(week_days, week_label):
                 user_on_waitlist = user in waiting
 
                 with slot_cols[j]:
-                    st.caption(slot_label.replace(" – ", "–"))
+                    st.markdown(f"**{slot_label.replace(' – ', '–')}**")
 
                     if user_is_in:
                         if st.button(t("you_n", n=booked, cap=capacity), key=f"btn_{cell_id}",
