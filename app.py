@@ -88,10 +88,9 @@ T = {
 
     # ---- Cell buttons / labels ----
     "book":                    {"en": "Book",                       "es": "Reservar"},
-    "book_n":                  {"en": "Book ({n}/{cap})",           "es": "Reservar ({n}/{cap})"},
-    "full":                    {"en": "Full ({n}/{cap})",           "es": "Lleno ({n}/{cap})"},
-    "full_waiting":            {"en": "Full ({n}/{cap}) +{w} waiting",
-                                 "es": "Lleno ({n}/{cap}) +{w} en espera"},
+    "book_n":                  {"en": "Book · {free} free",         "es": "Reservar · {free} libre"},
+    "book_1":                  {"en": "Book · 1 free",              "es": "Reservar · 1 libre"},
+    "full":                    {"en": "Full",                       "es": "Lleno"},
     "you_n":                   {"en": "✓ You ({n}/{cap})",          "es": "✓ Tú ({n}/{cap})"},
     "unbook_header":           {"en": "Unbook:",                    "es": "Liberar:"},
     "unbook_btn_you":          {"en": "✕ Unbook me",                "es": "✕ Liberar turno"},
@@ -654,7 +653,9 @@ def render_week_grid(week_days, week_label):
                             if add_to_waitlist(date_str, slot_label, user):
                                 st.rerun()
                     elif people:
-                        if st.button(t("book_n", n=booked, cap=capacity), key=f"btn_{cell_id}",
+                        free = capacity - booked
+                        label = t("book_1") if free == 1 else t("book_n", free=free)
+                        if st.button(label, key=f"btn_{cell_id}",
                                      use_container_width=True, type="primary"):
                             if book_slot(date_str, slot_label, user):
                                 st.rerun()
