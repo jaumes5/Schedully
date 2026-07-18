@@ -214,20 +214,34 @@ CREATE TABLE IF NOT EXISTS waitlist (id SERIAL PRIMARY KEY, slot_date TEXT NOT N
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);"""
 
 
-def get_setting(key, default=None):
+def _clear_read_caches():
+    get_bookings.clear()
+    get_waitlist.clear()
+    get_setting_cached.clear()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_setting_cached(key):
     try:
         r = _req("GET", "settings", params={"select": "value", "key": f"eq.{key}"})
         data = r.json()
-        return data[0]["value"] if data else default
+        return data[0]["value"] if data else None
     except Exception:
-        return default
+        return None
+
+
+def get_setting(key, default=None):
+    val = get_setting_cached(key)
+    return val if val is not None else default
 
 
 def set_setting(key, value):
     _req("POST", "settings", data={"key": key, "value": value},
          params={"on_conflict": "key"})
+    _clear_read_caches()
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def get_bookings():
     try:
         r = _req("GET", "bookings", params={
@@ -241,6 +255,7 @@ def get_bookings():
         return pd.DataFrame(columns=["id", "slot_date", "slot_time", "participant_name"])
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def get_waitlist():
     try:
         r = _req("GET", "waitlist", params={
@@ -255,15 +270,10 @@ def get_waitlist():
 
 
 def get_slot_count(slot_date, slot_time):
-    try:
-        r = _req("GET", "bookings", params={
-            "select": "id",
-            "slot_date": f"eq.{slot_date}",
-            "slot_time": f"eq.{slot_time}",
-        })
-        return len(r.json())
-    except Exception:
-        return 0
+    """Count from cached DataFrame — zero HTTP calls."""
+    df = get_bookings()
+    mask = (df["slot_date"] == slot_date) & (df["slot_time"] == slot_time)
+    return mask.sum() if "slot_date" in df.columns else 0
 
 
 def book_slot(slot_date, slot_time, name):
@@ -276,6 +286,7 @@ def book_slot(slot_date, slot_time, name):
         _req("POST", "bookings", data={
             "slot_date": slot_date, "slot_time": slot_time, "participant_name": name
         })
+        _clear_read_caches()
         return True
     except Exception:
         st.error(t("already_booked"))
@@ -287,6 +298,7 @@ def add_to_waitlist(slot_date, slot_time, name):
         _req("POST", "waitlist", data={
             "slot_date": slot_date, "slot_time": slot_time, "participant_name": name
         })
+        _clear_read_caches()
         return True
     except Exception:
         st.error(t("already_waitlisted"))
@@ -300,6 +312,7 @@ def remove_from_waitlist(slot_date, slot_time, name):
             "slot_time": f"eq.{slot_time}",
             "participant_name": f"eq.{name}",
         })
+        _clear_read_caches()
     except Exception:
         pass
 
@@ -337,6 +350,7 @@ def unbook_slot(slot_date, slot_time, name):
             })
     except Exception:
         pass
+    _clear_read_caches()
     if promoted_name:
         st.success(t("promoted_from_waitlist", name=promoted_name))
 
@@ -790,12 +804,13 @@ st.markdown("---")
 st.subheader(t("all_bookings_hours"))
 
 if not df_bookings.empty:
-    # Leaderboard
-    df_bookings["hours"] = df_bookings["slot_time"].map(SLOT_HOURS)
-    tally = df_bookings.groupby("participant_name")["hours"].sum().reset_index()
+    # Leaderboard (work on a copy, never mutate the cached DataFrame)
+    df_bk = df_bookings.copy()
+    df_bk["hours"] = df_bk["slot_time"].map(SLOT_HOURS)
+    tally = df_bk.groupby("participant_name")["hours"].sum().reset_index()
     tally = tally.sort_values("hours", ascending=False)
     tally.columns = [t("col_participant"), t("col_total_hours")]
-    tally[t("col_slots")] = df_bookings.groupby("participant_name").size().values
+    tally[t("col_slots")] = df_bk.groupby("participant_name").size().values
     st.dataframe(tally, hide_index=True, use_container_width=True)
 
     # Calendar grid view of the full schedule
