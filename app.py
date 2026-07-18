@@ -1,7 +1,10 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 import streamlit as st
 import pandas as pd
-import sqlite3
-from pathlib import Path
+import os
+import requests
 from datetime import date, timedelta
 
 # ------------------------------------------------------------------
@@ -16,7 +19,24 @@ TIME_SLOTS = [
 SLOT_CAPACITY = {s[0]: s[1] for s in TIME_SLOTS}
 SLOT_HOURS = {s[0]: s[2] for s in TIME_SLOTS}
 
-DB_PATH = Path(__file__).parent / "bookings.db"
+# Supabase REST API
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+
+def _req(method, path, data=None, params=None):
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+    }
+    url = f"{SUPABASE_URL}/rest/v1/{path}"
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+        headers["Prefer"] = "return=minimal"
+        r = requests.request(method, url, headers=headers, json=data, params=params)
+    else:
+        r = requests.request(method, url, headers=headers, params=params)
+    r.raise_for_status()
+    return r
 
 # ------------------------------------------------------------------
 # 1b. TRANSLATIONS
@@ -183,82 +203,64 @@ def generate_ics(user_name, df_bookings, cal_name):
 
 
 # ------------------------------------------------------------------
-# 2. DATABASE
+# 2. DATABASE (Supabase REST API)
 # ------------------------------------------------------------------
-def init_db():
-    conn = sqlite3.connect(str(DB_PATH))
-    # Handle old schema migration
-    cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='bookings'")
-    if cur.fetchone():
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(bookings)").fetchall()]
-        if "slot_name" in cols:
-            conn.execute("ALTER TABLE bookings RENAME TO bookings_backup")
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS bookings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            slot_date TEXT NOT NULL,
-            slot_time TEXT NOT NULL,
-            participant_name TEXT NOT NULL,
-            UNIQUE(slot_date, slot_time, participant_name)
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS waitlist (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            slot_date TEXT NOT NULL,
-            slot_time TEXT NOT NULL,
-            participant_name TEXT NOT NULL,
-            UNIQUE(slot_date, slot_time, participant_name)
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        )
-    """)
-    conn.commit()
-    conn.close()
+SETUP_SQL = """-- Run this once in Supabase SQL Editor (https://supabase.com/dashboard):
+CREATE TABLE IF NOT EXISTS bookings (id SERIAL PRIMARY KEY, slot_date TEXT NOT NULL, slot_time TEXT NOT NULL, participant_name TEXT NOT NULL, UNIQUE(slot_date, slot_time, participant_name));
+CREATE TABLE IF NOT EXISTS waitlist (id SERIAL PRIMARY KEY, slot_date TEXT NOT NULL, slot_time TEXT NOT NULL, participant_name TEXT NOT NULL, UNIQUE(slot_date, slot_time, participant_name));
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);"""
 
 
 def get_setting(key, default=None):
-    conn = sqlite3.connect(str(DB_PATH))
-    row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
-    conn.close()
-    return row[0] if row else default
+    try:
+        r = _req("GET", "settings", params={"select": "value", "key": f"eq.{key}"})
+        data = r.json()
+        return data[0]["value"] if data else default
+    except Exception:
+        return default
 
 
 def set_setting(key, value):
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value)
-    )
-    conn.commit()
-    conn.close()
+    _req("POST", "settings", data={"key": key, "value": value},
+         params={"on_conflict": "key"})
 
 
 def get_bookings():
-    conn = sqlite3.connect(str(DB_PATH))
-    df = pd.read_sql("SELECT * FROM bookings ORDER BY slot_date, slot_time", conn)
-    conn.close()
-    return df
+    try:
+        r = _req("GET", "bookings", params={
+            "select": "*", "order": "slot_date.asc,slot_time.asc"
+        })
+        data = r.json()
+        return pd.DataFrame(data) if data else pd.DataFrame(
+            columns=["id", "slot_date", "slot_time", "participant_name"]
+        )
+    except Exception:
+        return pd.DataFrame(columns=["id", "slot_date", "slot_time", "participant_name"])
 
 
 def get_waitlist():
-    conn = sqlite3.connect(str(DB_PATH))
-    df = pd.read_sql("SELECT * FROM waitlist ORDER BY slot_date, slot_time, id", conn)
-    conn.close()
-    return df
+    try:
+        r = _req("GET", "waitlist", params={
+            "select": "*", "order": "id.asc"
+        })
+        data = r.json()
+        return pd.DataFrame(data) if data else pd.DataFrame(
+            columns=["id", "slot_date", "slot_time", "participant_name"]
+        )
+    except Exception:
+        return pd.DataFrame(columns=["id", "slot_date", "slot_time", "participant_name"])
 
 
 def get_slot_count(slot_date, slot_time):
-    conn = sqlite3.connect(str(DB_PATH))
-    count = conn.execute(
-        "SELECT COUNT(*) FROM bookings WHERE slot_date = ? AND slot_time = ?",
-        (slot_date, slot_time),
-    ).fetchone()[0]
-    conn.close()
-    return count
+    try:
+        r = _req("GET", "bookings", params={
+            "select": "id",
+            "slot_date": f"eq.{slot_date}",
+            "slot_time": f"eq.{slot_time}",
+        })
+        return len(r.json())
+    except Exception:
+        return 0
 
 
 def book_slot(slot_date, slot_time, name):
@@ -267,71 +269,71 @@ def book_slot(slot_date, slot_time, name):
     if current >= capacity:
         st.error(t("slot_full", n=current, cap=capacity))
         return False
-    conn = sqlite3.connect(str(DB_PATH))
     try:
-        conn.execute(
-            "INSERT INTO bookings (slot_date, slot_time, participant_name) VALUES (?, ?, ?)",
-            (slot_date, slot_time, name),
-        )
-        conn.commit()
+        _req("POST", "bookings", data={
+            "slot_date": slot_date, "slot_time": slot_time, "participant_name": name
+        })
         return True
-    except sqlite3.IntegrityError:
+    except Exception:
         st.error(t("already_booked"))
         return False
-    finally:
-        conn.close()
 
 
 def add_to_waitlist(slot_date, slot_time, name):
-    conn = sqlite3.connect(str(DB_PATH))
     try:
-        conn.execute(
-            "INSERT INTO waitlist (slot_date, slot_time, participant_name) VALUES (?, ?, ?)",
-            (slot_date, slot_time, name),
-        )
-        conn.commit()
+        _req("POST", "waitlist", data={
+            "slot_date": slot_date, "slot_time": slot_time, "participant_name": name
+        })
         return True
-    except sqlite3.IntegrityError:
+    except Exception:
         st.error(t("already_waitlisted"))
         return False
-    finally:
-        conn.close()
 
 
 def remove_from_waitlist(slot_date, slot_time, name):
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.execute(
-        "DELETE FROM waitlist WHERE slot_date = ? AND slot_time = ? AND participant_name = ?",
-        (slot_date, slot_time, name),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        _req("DELETE", "waitlist", params={
+            "slot_date": f"eq.{slot_date}",
+            "slot_time": f"eq.{slot_time}",
+            "participant_name": f"eq.{name}",
+        })
+    except Exception:
+        pass
 
 
 def unbook_slot(slot_date, slot_time, name):
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.execute(
-        "DELETE FROM bookings WHERE slot_date = ? AND slot_time = ? AND participant_name = ?",
-        (slot_date, slot_time, name),
-    )
+    try:
+        _req("DELETE", "bookings", params={
+            "slot_date": f"eq.{slot_date}",
+            "slot_time": f"eq.{slot_time}",
+            "participant_name": f"eq.{name}",
+        })
+    except Exception:
+        pass
     # Auto-promote first person on waitlist
-    promoted = conn.execute(
-        "SELECT participant_name FROM waitlist WHERE slot_date = ? AND slot_time = ? ORDER BY id LIMIT 1",
-        (slot_date, slot_time),
-    ).fetchone()
     promoted_name = None
-    if promoted:
-        promoted_name = promoted[0]
-        conn.execute(
-            "INSERT INTO bookings (slot_date, slot_time, participant_name) VALUES (?, ?, ?)",
-            (slot_date, slot_time, promoted_name),
-        )
-        conn.execute(
-            "DELETE FROM waitlist WHERE slot_date = ? AND slot_time = ? AND participant_name = ?",
-            (slot_date, slot_time, promoted_name),
-        )
-    conn.commit()
-    conn.close()
+    try:
+        r = _req("GET", "waitlist", params={
+            "select": "participant_name",
+            "slot_date": f"eq.{slot_date}",
+            "slot_time": f"eq.{slot_time}",
+            "order": "id.asc",
+            "limit": "1",
+        })
+        data = r.json()
+        if data:
+            promoted_name = data[0]["participant_name"]
+            _req("POST", "bookings", data={
+                "slot_date": slot_date, "slot_time": slot_time,
+                "participant_name": promoted_name,
+            })
+            _req("DELETE", "waitlist", params={
+                "slot_date": f"eq.{slot_date}",
+                "slot_time": f"eq.{slot_time}",
+                "participant_name": f"eq.{promoted_name}",
+            })
+    except Exception:
+        pass
     if promoted_name:
         st.success(t("promoted_from_waitlist", name=promoted_name))
 
@@ -339,7 +341,6 @@ def unbook_slot(slot_date, slot_time, name):
 # ------------------------------------------------------------------
 # 3. INIT & FETCH
 # ------------------------------------------------------------------
-init_db()
 df_bookings = get_bookings()
 df_waitlist = get_waitlist()
 
@@ -375,6 +376,26 @@ if "current_user" not in st.session_state:
     st.session_state.current_user = None
 if "dialog_cell" not in st.session_state:
     st.session_state.dialog_cell = None  # (date_str, slot_label) or None
+
+# Check database is set up
+if SUPABASE_URL and SUPABASE_KEY and SUPABASE_KEY != "YOUR_SERVICE_ROLE_KEY_HERE":
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/bookings?select=count",
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+            timeout=5,
+        )
+        if r.status_code == 404:
+            st.error("Tables not found. Run this SQL in your Supabase SQL Editor:")
+            st.code(SETUP_SQL, language="sql")
+            st.stop()
+    except requests.exceptions.ConnectionError:
+        st.warning("Cannot reach Supabase — check your SUPABASE_URL and network connection.")
+        st.stop()
+elif not SUPABASE_URL or not SUPABASE_KEY or SUPABASE_KEY == "YOUR_SERVICE_ROLE_KEY_HERE":
+    st.info("Add your SUPABASE_URL and SUPABASE_SERVICE_KEY to the .env file.")
+    st.code(SETUP_SQL, language="sql")
+    st.stop()
 
 # Generate 14 days from today
 today = date.today()
@@ -728,15 +749,15 @@ with col1:
         st.metric(label=t("your_waitlist", user=user), value=t("waitlist_count", n=my_waitlisted))
 
 with col2:
-    if DB_PATH.exists() and user == owner_name:
-        with open(str(DB_PATH), "rb") as f:
-            st.download_button(
-                label=t("download_db"),
-                data=f,
-                file_name="bookings.db",
-                mime="application/octet-stream",
-                use_container_width=True,
-            )
+    if user == owner_name and not df_bookings.empty:
+        csv_data = df_bookings.to_csv(index=False)
+        st.download_button(
+            label=t("download_db"),
+            data=csv_data,
+            file_name="bookings.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
     # Export current user's bookings as .ics
     if not df_bookings.empty and user in df_bookings["participant_name"].values:
         ics_data = generate_ics(user, df_bookings, calendar_name)

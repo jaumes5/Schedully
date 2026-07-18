@@ -1,3 +1,4 @@
 bookings.db
 .idea/
 .venv/
+/.env
