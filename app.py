@@ -13,12 +13,14 @@ except ImportError:
 # ------------------------------------------------------------------
 # 1. CONFIGURATION
 # ------------------------------------------------------------------
-TIME_SLOTS = [
-    ("08:30 – 09:30", 4, 1.0),
-    ("13:00 – 14:00", 4, 1.0),
-    ("16:00 – 17:00", 4, 1.0),
-    ("19:30 – 20:30", 4, 1.0),
-]
+TIME_SLOTS = []
+for i in range(24):
+    start_m = 9 * 60 + i * 30
+    end_m = start_m + 30
+    sh, sm = divmod(start_m, 60)
+    eh, em = divmod(end_m, 60)
+    label = f"{sh:02d}:{sm:02d} – {eh:02d}:{em:02d}"
+    TIME_SLOTS.append((label, 4, 0.5))
 SLOT_CAPACITY = {s[0]: s[1] for s in TIME_SLOTS}
 SLOT_HOURS = {s[0]: s[2] for s in TIME_SLOTS}
 
@@ -130,7 +132,6 @@ T = {
 
     # ---- Dialog ----
     "slot_details":            {"en": "Slot details",               "es": "Detalles del turno"},
-    "download_db":             {"en": "Download DB",                "es": "Descargar BD"},
     "export_calendar":         {"en": "Export to calendar",         "es": "Exportar a calendario"},
     "no_bookings_to_export":   {"en": "No bookings to export.",      "es": "No hay reservas para exportar."},
 
@@ -146,6 +147,24 @@ T = {
     "default_title":           {"en": "Time Slot Coordinator",    "es": "Coordinador de Horarios"},
     "ics_summary":             {"en": "{name} – {slot}",            "es": "{name} – {slot}"},
     "owner_label":             {"en": "(owner)",                    "es": "(admin)"},
+
+    # ---- Batch booking ----
+    "batch_booking":           {"en": "Batch booking",              "es": "Reserva por lotes"},
+    "day":                     {"en": "Day",                        "es": "Día"},
+    "start_time":              {"en": "Start time",                 "es": "Hora inicio"},
+    "slots":                   {"en": "Slots",                      "es": "Turnos"},
+    "booked_ok":               {"en": "Booked!",                    "es": "¡Reservado!"},
+    "unbook_all":              {"en": "Unbook all ({n} slots · {h}h)",
+                                 "es": "Liberar todo ({n} turnos · {h}h)"},
+    "batch_preview":           {"en": "Preview:",                   "es": "Vista previa:"},
+    "will_book":               {"en": "Will book",                  "es": "Reservará"},
+    "will_skip":               {"en": "Will skip (taken)",          "es": "Ignorará (ocupado)"},
+
+    # ---- Mobile ----
+    "slot_mobile":             {"en": "slot",                       "es": "turno"},
+    "slots_mobile":            {"en": "slots",                      "es": "turnos"},
+    "free_mobile":             {"en": "free",                       "es": "libre"},
+    "h_short":                 {"en": "h",                          "es": "h"},
 
     # ---- Lang selector ----
     "language":                {"en": "Language",                   "es": "Idioma"},
@@ -275,11 +294,12 @@ def get_slot_count(slot_date, slot_time):
     return mask.sum() if "slot_date" in df.columns else 0
 
 
-def book_slot(slot_date, slot_time, name):
+def book_slot(slot_date, slot_time, name, silent=False):
     capacity = SLOT_CAPACITY[slot_time]
     current = get_slot_count(slot_date, slot_time)
     if current >= capacity:
-        st.error(t("slot_full", n=current, cap=capacity))
+        if not silent:
+            st.error(t("slot_full", n=current, cap=capacity))
         return False
     try:
         _req("POST", "bookings", data={
@@ -288,7 +308,8 @@ def book_slot(slot_date, slot_time, name):
         _clear_read_caches()
         return True
     except Exception:
-        st.error(t("already_booked"))
+        if not silent:
+            st.error(t("already_booked"))
         return False
 
 
@@ -394,6 +415,12 @@ if "dialog_cell" not in st.session_state:
     st.session_state.dialog_cell = None  # (date_str, slot_label) or None
 if "_dialog_shown" not in st.session_state:
     st.session_state._dialog_shown = False
+if "view_mode" not in st.session_state:
+    st.session_state.view_mode = "mobile"
+
+
+
+
 
 # Check database is set up
 if SUPABASE_URL and SUPABASE_KEY and SUPABASE_KEY != "YOUR_SERVICE_ROLE_KEY_HERE":
@@ -516,6 +543,11 @@ def render_cell_dialog():
         return
     date_str, slot_label = st.session_state.dialog_cell
     user = st.session_state.current_user
+
+    # Build the list of all slot labels to compute the max slots available
+    all_slots = [s[0] for s in TIME_SLOTS]
+    slot_idx = all_slots.index(slot_label) if slot_label in all_slots else 0
+
     people = booking_lookup.get((date_str, slot_label), [])
     waiting = waitlist_lookup.get((date_str, slot_label), [])
     capacity = SLOT_CAPACITY[slot_label]
@@ -526,30 +558,60 @@ def render_cell_dialog():
 
     d = date.fromisoformat(date_str)
     st.markdown(f"**{day_name(d)} {d.day} {month_name(d)} — {slot_label}**")
-    st.caption(f"{booked}/{capacity}")
+
+    # Find consecutive slots this user has booked (for unbook all)
+    my_consecutive = []
+    if user_is_in:
+        my_consecutive.append(slot_label)
+        # Check forward
+        for k in range(1, len(all_slots) - slot_idx):
+            sl = all_slots[slot_idx + k]
+            names = booking_lookup.get((date_str, sl), [])
+            if user in names:
+                my_consecutive.append(sl)
+            else:
+                break
+        # Check backward
+        for k in range(1, slot_idx + 1):
+            sl = all_slots[slot_idx - k]
+            names = booking_lookup.get((date_str, sl), [])
+            if user in names:
+                my_consecutive.insert(0, sl)
+            else:
+                break
 
     # Booked list
     if people:
         st.markdown(f"**{t('col_participant')}:**")
         for name in people:
-            mark = " (you)" if name == user else ""
+            mark = f" {t('owner_label')}" if name == user else ""
             st.markdown(f"- {name}{mark}")
 
     # Waitlist
     if waiting:
         st.markdown(f"**{t('waitlist_header')}**")
         for pos, name in enumerate(waiting, 1):
-            mark = " (you)" if name == user else ""
+            mark = f" {t('owner_label')}" if name == user else ""
             st.markdown(f"{pos}. {name}{mark}")
 
     st.markdown("---")
 
     # Actions
     if user_is_in:
+        if len(my_consecutive) > 1:
+            total_h = len(my_consecutive) * 0.5
+            st.caption(f"{len(my_consecutive)} consecutive slots · {total_h:g}h")
         if st.button(t("unbook_btn_you"), use_container_width=True, type="primary"):
             unbook_slot(date_str, slot_label, user)
             st.session_state.dialog_cell = None
             st.rerun()
+        if len(my_consecutive) > 1:
+            total_h = len(my_consecutive) * 0.5
+            if st.button(f"Unbook all ({len(my_consecutive)} slots · {total_h:g}h)", use_container_width=True):
+                for sl in my_consecutive:
+                    unbook_slot(date_str, sl, user)
+                st.session_state.dialog_cell = None
+                st.rerun()
     elif user_on_waitlist:
         if st.button(t("leave_waitlist"), use_container_width=True):
             remove_from_waitlist(date_str, slot_label, user)
@@ -574,128 +636,166 @@ def render_cell_dialog():
 # ------------------------------------------------------------------
 # 6. CALENDAR RENDERING
 # ------------------------------------------------------------------
-def _render_booking_names(people, waiting, waiting_count, user, user_is_in):
-    """Show booking/waitlist names with fixed height for alignment."""
-    # Booking area — always rendered at exactly 2.5em height
-    if people:
-        shown = people[:2]
-        overflow = len(people) - 2
-        lines = "<br>".join(shown)
-        if overflow > 0:
-            lines += f"<br><span style='opacity:0.5'>+{overflow}</span>"
-        bg = "#d4edda" if user_is_in else "#e8e8e8"
-        border = "#28a745" if user_is_in else "#aaa"
-        st.markdown(
-            f"<div style='height:2.5em;padding:0.15em 0.3em;box-sizing:border-box;"
-            f"overflow:hidden;font-size:0.78em;line-height:1.35;"
-            f"background:{bg};border-radius:4px;"
-            f"border-left:3px solid {border};color:#222;'>{lines}</div>",
-            unsafe_allow_html=True,
+def _render_cell_content(date_str, slot_label, capacity, people, waiting, user, user_is_in, user_on_waitlist, booked, full, cell_id, show_names=True):
+    """Shared cell rendering used by both desktop grid and mobile cards."""
+    if user_is_in:
+        if st.button(
+            f"✓{booked}", key=f"btn_{cell_id}", use_container_width=True, type="primary",
+        ):
+            st.session_state.dialog_cell = (date_str, slot_label)
+            st.rerun()
+    elif user_on_waitlist:
+        if st.button(
+            f"☐", key=f"btn_{cell_id}", use_container_width=True,
+        ):
+            remove_from_waitlist(date_str, slot_label, user)
+            st.rerun()
+    elif full:
+        st.button(
+            f"{booked}/{capacity}", key=f"btn_{cell_id}", use_container_width=True, disabled=True,
         )
+    elif people:
+        if st.button(
+            f"{booked}/{capacity}", key=f"btn_{cell_id}", use_container_width=True,
+        ):
+            book_slot(date_str, slot_label, user)
+            st.rerun()
     else:
-        st.markdown("<div style='height:2.5em;'></div>", unsafe_allow_html=True)
+        if st.button(
+            f"0/{capacity}", key=f"btn_{cell_id}", use_container_width=True,
+        ):
+            book_slot(date_str, slot_label, user)
+            st.rerun()
 
-    # Waitlist area — always rendered at exactly 1.1em height
-    if waiting_count:
-        shown = waiting[:2]
-        overflow = waiting_count - 2
-        wait_text = ", ".join(shown)
-        if overflow > 0:
-            wait_text += f" +{overflow}"
-        st.markdown(
-            f"<div style='height:1.1em;padding:0.1em 0.3em;box-sizing:border-box;"
-            f"overflow:hidden;font-size:0.7em;line-height:1.3;"
-            f"background:#fffbe6;border-radius:4px;"
-            f"color:#997700;'>☐ {wait_text}</div>",
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown("<div style='height:1.1em;'></div>", unsafe_allow_html=True)
+    # Tiny name labels below
+    if show_names:
+        all_names = list(people) + [f"☐{n}" for n in waiting]
+        if all_names:
+            st.markdown(
+                f"<div style='font-size:0.5em;line-height:1;color:#aaa;"
+                f"text-align:center;overflow:hidden;white-space:nowrap;"
+                f"margin:-2px 0 0 0;'>{', '.join(all_names[:3])}</div>",
+                unsafe_allow_html=True,
+            )
 
 
 def render_week_grid(week_days, week_label):
     st.markdown(f"#### {week_label}")
     user = st.session_state.current_user
 
+    # ---- Day headers ----
+    cols = st.columns([0.6] + [1] * 7, gap=None)
+    with cols[0]:
+        st.markdown("&nbsp;", unsafe_allow_html=True)
+    for i, d in enumerate(week_days):
+        with cols[i + 1]:
+            st.markdown(
+                f"<div style='text-align:center;font-weight:700;font-size:0.85em;"
+                f"background:#f0f2f6;padding:0.3em 0;border-radius:6px 6px 0 0;"
+                f"line-height:1.2;'>{day_name(d)}<br>"
+                f"<span style='font-size:0.75em;color:#666;'>{d.day}</span></div>",
+                unsafe_allow_html=True,
+            )
+
+    # ---- Time-slot rows ----
+    for j, (slot_label, capacity, hours) in enumerate(TIME_SLOTS):
+        # Show hour label only on the hour (:00) or on first slot
+        time_short = slot_label.split(chr(8211))[0].strip()
+        is_hour = time_short.endswith(":00") or j == 0
+
+        cols = st.columns([0.6] + [1] * 7, gap=None)
+        with cols[0]:
+            if is_hour:
+                st.markdown(
+                    f"<div style='font-size:0.68em;font-weight:600;color:#555;"
+                    f"text-align:right;padding:0;line-height:1.6;'>{time_short}</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    "<div style='line-height:0;height:0;'>&nbsp;</div>",
+                    unsafe_allow_html=True,
+                )
+
+        for i, d in enumerate(week_days):
+            date_str = d.isoformat()
+            people = booking_lookup.get((date_str, slot_label), [])
+            waiting = waitlist_lookup.get((date_str, slot_label), [])
+            booked = len(people)
+            full = booked >= capacity
+            cell_id = f"{date_str}|{slot_label}"
+            user_is_in = user in people
+            user_on_waitlist = user in waiting
+
+            with cols[i + 1]:
+                _render_cell_content(date_str, slot_label, capacity, people, waiting, user, user_is_in, user_on_waitlist, booked, full, cell_id)
+
+
+def render_week_grid_mobile(week_days, week_label):
+    """Mobile layout: each day as an expandable card with vertical time slots."""
+    st.markdown(f"#### {week_label}")
+    user = st.session_state.current_user
+
     for d in week_days:
         date_str = d.isoformat()
-        with st.container(border=True):
-            # Day header
-            st.markdown(f"**{day_name(d)} {d.day} {month_name(d)}**")
+        day_bookings = 0
+        free_hours = 0.0
+        day_slots = []
+        for slot_label, capacity, hours in TIME_SLOTS:
+            people = booking_lookup.get((date_str, slot_label), [])
+            waiting = waitlist_lookup.get((date_str, slot_label), [])
+            booked = len(people)
+            if booked > 0:
+                day_bookings += 1
+            if booked < capacity:
+                free_hours += 0.5
+            day_slots.append((slot_label, capacity, people, waiting, booked))
 
-            # Time slots side-by-side within this day card
-            slot_cols = st.columns(len(TIME_SLOTS), gap="small")
-            for j, (slot_label, capacity, hours) in enumerate(TIME_SLOTS):
-                people = booking_lookup.get((date_str, slot_label), [])
-                waiting = waitlist_lookup.get((date_str, slot_label), [])
-                booked = len(people)
-                waiting_count = len(waiting)
+        slot_word = t("slot_mobile") if day_bookings == 1 else t("slots_mobile")
+        expander_label = f"{day_name(d)} {d.day} {month_name(d)}"
+        parts = []
+        if day_bookings > 0:
+            parts.append(f"{day_bookings} {slot_word}")
+        if free_hours > 0:
+            h_label = f"{free_hours:g}{t('h_short')} {t('free_mobile')}"
+            parts.append(h_label)
+        if parts:
+            expander_label += " (" + " · ".join(parts) + ")"
+
+        with st.expander(expander_label):
+            for slot_label, capacity, people, waiting, booked in day_slots:
                 full = booked >= capacity
-                cell_id = f"{date_str}|{slot_label}"
+                waiting_count = len(waiting)
                 user_is_in = user in people
                 user_on_waitlist = user in waiting
+                cell_id = f"{date_str}|{slot_label}"
 
-                with slot_cols[j]:
-                    st.markdown(f"**{slot_label.replace(' – ', '–')}**")
-
-                    if user_is_in:
-                        if st.button(t("you_n", n=booked, cap=capacity), key=f"btn_{cell_id}",
-                                     use_container_width=True, type="primary"):
-                            st.session_state.dialog_cell = (date_str, slot_label)
-                            st.rerun()
-                    elif user_on_waitlist:
-                        pos = waiting.index(user) + 1
-                        if st.button(t("waitlisted_you_n", pos=pos), key=f"btn_{cell_id}",
-                                     use_container_width=True, type="primary"):
-                            st.session_state.dialog_cell = (date_str, slot_label)
-                            st.rerun()
-                    elif full:
-                        btn_label = t("join_waitlist_n", n=booked, cap=capacity, w=waiting_count) if waiting_count else t("join_waitlist")
-                        if st.button(btn_label, key=f"btn_{cell_id}", use_container_width=True):
-                            if add_to_waitlist(date_str, slot_label, user):
-                                st.rerun()
-                    elif people:
-                        free = capacity - booked
-                        label = t("book_1") if free == 1 else t("book_n", free=free)
-                        if st.button(label, key=f"btn_{cell_id}",
-                                     use_container_width=True, type="primary"):
-                            if book_slot(date_str, slot_label, user):
-                                st.rerun()
-                    else:
-                        if st.button(t("book"), key=f"btn_{cell_id}", use_container_width=True,
-                                     type="primary"):
-                            if book_slot(date_str, slot_label, user):
-                                st.rerun()
-
-                    # Names below button (no fixed heights needed here)
-                    _render_booking_names_compact(people, waiting, waiting_count, user, user_is_in)
-
-
-def _render_booking_names_compact(people, waiting, waiting_count, user, user_is_in):
-    """Show booking/waitlist names compactly (no alignment needed)."""
-    if people:
-        shown = people[:3]
-        overflow = len(people) - 3
-        text = ", ".join(shown)
-        if overflow > 0:
-            text += f" +{overflow}"
-        bg = "#d4edda" if user_is_in else "#f5f5f5"
-        st.markdown(
-            f"<div style='padding:0.1em 0.3em;font-size:0.75em;line-height:1.3;"
-            f"background:{bg};border-radius:3px;color:#333;'>{text}</div>",
-            unsafe_allow_html=True,
-        )
-    if waiting_count:
-        shown = waiting[:2]
-        overflow = waiting_count - 2
-        text = ", ".join(shown)
-        if overflow > 0:
-            text += f" +{overflow}"
-        st.markdown(
-            f"<div style='padding:0.05em 0.3em;font-size:0.68em;line-height:1.2;"
-            f"background:#fffbe6;border-radius:3px;color:#997700;'>☐ {text}</div>",
-            unsafe_allow_html=True,
-        )
+                mc1, mc2, mc3 = st.columns([1.6, 1, 2.4])
+                with mc1:
+                    # Time + occupancy bar (● = filled, ○ = empty)
+                    filled = min(booked, capacity)
+                    free = capacity - filled
+                    bar = "●" * filled + "○" * free
+                    st.markdown(
+                        f"<span style='font-size:0.78em;font-weight:600;color:#555;'>"
+                        f"{slot_label.split(chr(8211))[0].strip()}</span>"
+                        f"<span style='font-size:0.6em;letter-spacing:-1px;margin-left:2px;'>{bar}</span>",
+                        unsafe_allow_html=True,
+                    )
+                with mc2:
+                    _render_cell_content(date_str, slot_label, capacity, people, waiting, user, user_is_in, user_on_waitlist, booked, full, cell_id, show_names=False)
+                with mc3:
+                    parts = []
+                    if people:
+                        parts.append(", ".join(people))
+                    if waiting:
+                        parts.append(f"☐ {len(waiting)}")
+                    if parts:
+                        st.markdown(
+                            f"<div style='font-size:0.62em;line-height:1.3;color:#666;"
+                            f"margin-top:3px;'>{'  ·  '.join(parts)}</div>",
+                            unsafe_allow_html=True,
+                        )
 
 
 # ------------------------------------------------------------------
@@ -777,15 +877,6 @@ with col1:
         st.metric(label=t("your_waitlist", user=user), value=t("waitlist_count", n=my_waitlisted))
 
 with col2:
-    if user == owner_name and not df_bookings.empty:
-        csv_data = df_bookings.to_csv(index=False)
-        st.download_button(
-            label=t("download_db"),
-            data=csv_data,
-            file_name="bookings.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
     # Export current user's bookings as .ics
     if not df_bookings.empty and user in df_bookings["participant_name"].values:
         ics_data = generate_ics(user, df_bookings, calendar_name)
@@ -799,15 +890,84 @@ with col2:
 
 st.markdown("---")
 
+# ---- BATCH BOOKING PANEL ----
+all_slots_labels = [s[0] for s in TIME_SLOTS]
+
+with st.expander(t("batch_booking"), expanded=False):
+    day_options = [d.isoformat() for d in all_days]
+    day_labels_list = [f"{day_name(d)} {d.day} {month_name(d)}" for d in all_days]
+
+    bc1, bc2, bc3, bc4 = st.columns([2, 1.5, 1, 1])
+    with bc1:
+        batch_day = st.selectbox(t("day"), day_options, format_func=lambda x: day_labels_list[day_options.index(x)], key="batch_day")
+    with bc2:
+        batch_time = st.selectbox(t("start_time"), all_slots_labels, key="batch_time")
+    with bc3:
+        slot_idx_b = all_slots_labels.index(batch_time) if batch_time in all_slots_labels else 0
+        max_b = len(all_slots_labels) - slot_idx_b
+        batch_n = st.number_input(t("slots"), min_value=1, max_value=max_b, value=1, step=1, key="batch_n")
+    with bc4:
+        total_h = batch_n * 0.5
+        st.caption(f"{total_h:g}h")
+        if st.button(t("book"), use_container_width=True, type="primary", key="batch_go"):
+            for k in range(batch_n):
+                if slot_idx_b + k >= len(all_slots_labels):
+                    break
+                sl = all_slots_labels[slot_idx_b + k]
+                book_slot(batch_day, sl, user, silent=True)
+            st.rerun()
+
+    # Preview as compact visual timeline
+    blocks = []
+    count_book = 0
+    count_skip = 0
+    for k in range(min(batch_n, max_b)):
+        sl = all_slots_labels[slot_idx_b + k]
+        cur = get_slot_count(batch_day, sl)
+        cap = SLOT_CAPACITY[sl]
+        if cur >= cap or user in booking_lookup.get((batch_day, sl), []):
+            blocks.append("<span style='display:inline-block;width:10px;height:10px;"
+                          "background:#ddd;border-radius:2px;margin:1px;' title='skip'></span>")
+            count_skip += 1
+        else:
+            blocks.append("<span style='display:inline-block;width:10px;height:10px;"
+                          "background:#4caf50;border-radius:2px;margin:1px;' title='book'></span>")
+            count_book += 1
+    time_start = all_slots_labels[slot_idx_b].split(chr(8211))[0].strip()
+    time_end = all_slots_labels[min(slot_idx_b + batch_n - 1, len(all_slots_labels) - 1)].split(chr(8211))[1].strip()
+    st.markdown(
+        f"**{t('batch_preview')}** {time_start}–{time_end} "
+        f"<span style='color:#4caf50;'>{count_book} {t('will_book').lower()}</span> "
+        f"<span style='color:#888;'>{count_skip} {t('will_skip').lower()}</span>",
+        unsafe_allow_html=True,
+    )
+    st.markdown("".join(blocks), unsafe_allow_html=True)
+
 # ---- CALENDAR ----
-st.subheader(t("schedule_calendar"))
+col_cal, col_toggle = st.columns([4, 1])
+with col_cal:
+    st.subheader(t("schedule_calendar"))
+with col_toggle:
+    if st.session_state.view_mode == "mobile":
+        if st.button("🖥️ Desktop", use_container_width=True, key="to_desktop"):
+            st.session_state.view_mode = "desktop"
+            st.rerun()
+    else:
+        if st.button("📱 Mobile", use_container_width=True, key="to_mobile"):
+            st.session_state.view_mode = "mobile"
+            st.rerun()
 
 w1_start, w1_end = format_date_range(week1[0], week1[-1])
 w2_start, w2_end = format_date_range(week2[0], week2[-1])
 
-render_week_grid(week1, t("week_1", start=w1_start, end=w1_end))
-st.markdown("<br>", unsafe_allow_html=True)
-render_week_grid(week2, t("week_2", start=w2_start, end=w2_end))
+if st.session_state.view_mode == "mobile":
+    render_week_grid_mobile(week1, t("week_1", start=w1_start, end=w1_end))
+    st.markdown("<br>", unsafe_allow_html=True)
+    render_week_grid_mobile(week2, t("week_2", start=w2_start, end=w2_end))
+else:
+    render_week_grid(week1, t("week_1", start=w1_start, end=w1_end))
+    st.markdown("<br>", unsafe_allow_html=True)
+    render_week_grid(week2, t("week_2", start=w2_start, end=w2_end))
 
 st.markdown("---")
 
@@ -818,10 +978,19 @@ if not df_bookings.empty:
     # Leaderboard (work on a copy, never mutate the cached DataFrame)
     df_bk = df_bookings.copy()
     df_bk["hours"] = df_bk["slot_time"].map(SLOT_HOURS)
+
+    # Slot count per participant (before sorting)
+    slots_df = df_bk.groupby("participant_name").size().reset_index(name="cnt")
+
+    # Hours tally
     tally = df_bk.groupby("participant_name")["hours"].sum().reset_index()
-    tally = tally.sort_values("hours", ascending=False)
     tally.columns = [t("col_participant"), t("col_total_hours")]
-    tally[t("col_slots")] = df_bk.groupby("participant_name").size().values
+
+    # Merge slot count — ensures alignment regardless of sort order
+    tally = tally.merge(slots_df, left_on=t("col_participant"), right_on="participant_name", how="left")
+    tally[t("col_slots")] = tally["cnt"]
+    tally = tally.drop(columns=["participant_name", "cnt"])
+    tally = tally.sort_values(t("col_total_hours"), ascending=False)
     st.dataframe(tally, hide_index=True, use_container_width=True)
 
     # Calendar grid view of the full schedule
