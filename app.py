@@ -731,71 +731,81 @@ def render_week_grid(week_days, week_label):
                 _render_cell_content(date_str, slot_label, capacity, people, waiting, user, user_is_in, user_on_waitlist, booked, full, cell_id)
 
 
+def _render_mobile_day_card(d, user):
+    """Render a single day expander card. Used by the mobile layout."""
+    date_str = d.isoformat()
+    day_bookings = 0
+    free_hours = 0.0
+    day_slots = []
+    for slot_label, capacity, hours in TIME_SLOTS:
+        people = booking_lookup.get((date_str, slot_label), [])
+        waiting = waitlist_lookup.get((date_str, slot_label), [])
+        booked = len(people)
+        if booked > 0:
+            day_bookings += 1
+        if booked < capacity:
+            free_hours += 0.5
+        day_slots.append((slot_label, capacity, people, waiting, booked))
+
+    slot_word = t("slot_mobile") if day_bookings == 1 else t("slots_mobile")
+    expander_label = f"{day_name(d)} {d.day} {month_name(d)}"
+    parts = []
+    if day_bookings > 0:
+        parts.append(f"{day_bookings} {slot_word}")
+    if free_hours > 0:
+        h_label = f"{free_hours:g}{t('h_short')} {t('free_mobile')}"
+        parts.append(h_label)
+    if parts:
+        expander_label += " (" + " · ".join(parts) + ")"
+
+    with st.expander(expander_label):
+        for slot_label, capacity, people, waiting, booked in day_slots:
+            full = booked >= capacity
+            waiting_count = len(waiting)
+            user_is_in = user in people
+            user_on_waitlist = user in waiting
+            cell_id = f"{date_str}|{slot_label}"
+
+            mc1, mc2, mc3 = st.columns([1.6, 1, 2.4])
+            with mc1:
+                filled = min(booked, capacity)
+                bar = "●" * filled + "○" * (capacity - filled)
+                st.markdown(
+                    f"<span style='font-size:0.78em;font-weight:600;color:#555;'>"
+                    f"{slot_label.split(chr(8211))[0].strip()}</span>"
+                    f"<span style='font-size:0.6em;letter-spacing:-1px;margin-left:2px;'>{bar}</span>",
+                    unsafe_allow_html=True,
+                )
+            with mc2:
+                _render_cell_content(date_str, slot_label, capacity, people, waiting, user, user_is_in, user_on_waitlist, booked, full, cell_id, show_names=False)
+            with mc3:
+                parts_n = []
+                if people:
+                    parts_n.append(", ".join(people))
+                if waiting:
+                    parts_n.append(f"☐ {len(waiting)}")
+                if parts_n:
+                    st.markdown(
+                        f"<div style='font-size:0.62em;line-height:1.3;color:#666;"
+                        f"margin-top:3px;'>{'  ·  '.join(parts_n)}</div>",
+                        unsafe_allow_html=True,
+                    )
+
+
 def render_week_grid_mobile(week_days, week_label):
-    """Mobile layout: each day as an expandable card with vertical time slots."""
+    """Mobile layout: day cards in 3-column grid per row."""
     st.markdown(f"#### {week_label}")
     user = st.session_state.current_user
 
-    for d in week_days:
-        date_str = d.isoformat()
-        day_bookings = 0
-        free_hours = 0.0
-        day_slots = []
-        for slot_label, capacity, hours in TIME_SLOTS:
-            people = booking_lookup.get((date_str, slot_label), [])
-            waiting = waitlist_lookup.get((date_str, slot_label), [])
-            booked = len(people)
-            if booked > 0:
-                day_bookings += 1
-            if booked < capacity:
-                free_hours += 0.5
-            day_slots.append((slot_label, capacity, people, waiting, booked))
-
-        slot_word = t("slot_mobile") if day_bookings == 1 else t("slots_mobile")
-        expander_label = f"{day_name(d)} {d.day} {month_name(d)}"
-        parts = []
-        if day_bookings > 0:
-            parts.append(f"{day_bookings} {slot_word}")
-        if free_hours > 0:
-            h_label = f"{free_hours:g}{t('h_short')} {t('free_mobile')}"
-            parts.append(h_label)
-        if parts:
-            expander_label += " (" + " · ".join(parts) + ")"
-
-        with st.expander(expander_label):
-            for slot_label, capacity, people, waiting, booked in day_slots:
-                full = booked >= capacity
-                waiting_count = len(waiting)
-                user_is_in = user in people
-                user_on_waitlist = user in waiting
-                cell_id = f"{date_str}|{slot_label}"
-
-                mc1, mc2, mc3 = st.columns([1.6, 1, 2.4])
-                with mc1:
-                    # Time + occupancy bar (● = filled, ○ = empty)
-                    filled = min(booked, capacity)
-                    free = capacity - filled
-                    bar = "●" * filled + "○" * free
-                    st.markdown(
-                        f"<span style='font-size:0.78em;font-weight:600;color:#555;'>"
-                        f"{slot_label.split(chr(8211))[0].strip()}</span>"
-                        f"<span style='font-size:0.6em;letter-spacing:-1px;margin-left:2px;'>{bar}</span>",
-                        unsafe_allow_html=True,
-                    )
-                with mc2:
-                    _render_cell_content(date_str, slot_label, capacity, people, waiting, user, user_is_in, user_on_waitlist, booked, full, cell_id, show_names=False)
-                with mc3:
-                    parts = []
-                    if people:
-                        parts.append(", ".join(people))
-                    if waiting:
-                        parts.append(f"☐ {len(waiting)}")
-                    if parts:
-                        st.markdown(
-                            f"<div style='font-size:0.62em;line-height:1.3;color:#666;"
-                            f"margin-top:3px;'>{'  ·  '.join(parts)}</div>",
-                            unsafe_allow_html=True,
-                        )
+    cols_per_row = 3
+    for row_start in range(0, len(week_days), cols_per_row):
+        row_cols = st.columns(cols_per_row, gap="small")
+        for i in range(cols_per_row):
+            d_idx = row_start + i
+            if d_idx >= len(week_days):
+                break
+            with row_cols[i]:
+                _render_mobile_day_card(week_days[d_idx], user)
 
 
 # ------------------------------------------------------------------
